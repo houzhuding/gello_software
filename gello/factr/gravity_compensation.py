@@ -87,10 +87,18 @@ class FACTRGravityCompensation:
     CALIBRATION_RANGE_MULTIPLIER = 20  # Range: -20π to 20π
     CALIBRATION_STEP_COUNT = 81  # 20 * 4 + 1 steps
 
-    def __init__(self, config_path: str):
+    def __init__(
+        self,
+        config_path: str,
+        enable_gravity_comp: Optional[bool] = None,
+        gravity_comp_gain: Optional[float] = None,
+    ):
         self.running = False
         self.config_path = config_path
         self.driver: Optional[DynamixelDriver] = None  # Initialize early for cleanup
+        self.has_leader_gripper: bool = True
+        self._override_gravity_comp = enable_gravity_comp  # CLI override if not None
+        self._override_gravity_comp_gain = gravity_comp_gain
 
         # Teleop-related fields
         self.teleop_enabled: bool = False
@@ -164,7 +172,25 @@ class FACTRGravityCompensation:
 
         # Control parameters
         self.enable_gravity_comp = self.config["controller"]["gravity_comp"]["enable"]
-        self.gravity_comp_modifier = self.config["controller"]["gravity_comp"]["gain"]
+        # CLI override takes precedence
+        if self._override_gravity_comp is not None:
+            self.enable_gravity_comp = self._override_gravity_comp
+        gravity_cfg = self.config["controller"]["gravity_comp"]
+        self.gravity_comp_modifier = float(gravity_cfg.get("gain", 1.0))
+        if self._override_gravity_comp_gain is not None:
+            self.gravity_comp_modifier = float(self._override_gravity_comp_gain)
+
+        per_joint_gains = gravity_cfg.get("per_joint_gains")
+        if per_joint_gains is None:
+            self.gravity_comp_joint_gains = np.ones(self.num_arm_joints)
+        else:
+            self.gravity_comp_joint_gains = np.array(per_joint_gains, dtype=float)
+            if len(self.gravity_comp_joint_gains) != self.num_arm_joints:
+                raise ValueError(
+                    "Invalid gravity_comp.per_joint_gains length: expected num_arm_joints "
+                    f"(got per_joint_gains={len(self.gravity_comp_joint_gains)}, "
+                    f"num_arm_joints={self.num_arm_joints})"
+                )
         self.tau_g = np.zeros(self.num_arm_joints)
 
         # Friction compensation
@@ -188,21 +214,78 @@ class FACTRGravityCompensation:
         )
         self.null_space_kp = self.config["controller"]["null_space_regulation"]["kp"]
         self.null_space_kd = self.config["controller"]["null_space_regulation"]["kd"]
+        self.print_overrun_warnings = bool(
+            self.config["controller"].get("print_overrun_warnings", False)
+        )
+        self._last_overrun_warn_t = 0.0
 
         print(f"Control frequency: {1 / self.dt:.1f} Hz")
         print(
             f"Gravity compensation: {'enabled' if self.enable_gravity_comp else 'disabled'}"
         )
+        if self.enable_gravity_comp:
+            print(f"Gravity compensation gain: {self.gravity_comp_modifier:.3f}")
+            print(
+                "Gravity compensation per-joint gains: "
+                f"{[round(float(x), 3) for x in self.gravity_comp_joint_gains]}"
+            )
 
     def _prepare_dynamixel(self) -> None:
         """Initialize Dynamixel servo driver."""
         self.servo_types = self.config["dynamixel"]["servo_types"]
         self.num_motors = len(self.servo_types)
+        if self.num_motors == self.num_arm_joints:
+            # Support leaders without a dedicated gripper motor
+            self.has_leader_gripper = False
+        elif self.num_motors == self.num_arm_joints + 1:
+            self.has_leader_gripper = True
+        else:
+            raise ValueError(
+                "Invalid motor count: expected num_arm_joints or num_arm_joints + 1 "
+                f"(got num_motors={self.num_motors}, num_arm_joints={self.num_arm_joints})"
+            )
         self.joint_signs = np.array(
             self.config["dynamixel"]["joint_signs"], dtype=float
         )
+        if len(self.joint_signs) != self.num_motors:
+            raise ValueError(
+                "Invalid joint_signs length: expected same length as servo_types "
+                f"(got joint_signs={len(self.joint_signs)}, servo_types={self.num_motors})"
+            )
         self.dynamixel_port = (
             "/dev/serial/by-id/" + self.config["dynamixel"]["dynamixel_port"]
+        )
+        self.dynamixel_baudrate = int(self.config["dynamixel"].get("baudrate", 57600))
+        joint_current_limits_cfg = self.config["dynamixel"].get("current_limits_ma")
+        if joint_current_limits_cfg is None:
+            self.joint_current_limits_ma = None
+        else:
+            self.joint_current_limits_ma = [float(x) for x in joint_current_limits_cfg]
+            if len(self.joint_current_limits_ma) != self.num_motors:
+                raise ValueError(
+                    "Invalid current_limits_ma length: expected same length as servo_types "
+                    f"(got current_limits_ma={len(self.joint_current_limits_ma)}, servo_types={self.num_motors})"
+                )
+            if any(x <= 0 for x in self.joint_current_limits_ma):
+                raise ValueError(
+                    f"current_limits_ma must be > 0 for all joints, got {self.joint_current_limits_ma}"
+                )
+
+        joint_ids_cfg = self.config["dynamixel"].get("joint_ids")
+        if joint_ids_cfg is None:
+            self.joint_ids = (np.arange(self.num_motors) + 1).tolist()
+        else:
+            self.joint_ids = [int(x) for x in joint_ids_cfg]
+            if len(self.joint_ids) != self.num_motors:
+                raise ValueError(
+                    "Invalid joint_ids length: expected same length as servo_types "
+                    f"(got joint_ids={len(self.joint_ids)}, servo_types={self.num_motors})"
+                )
+            if len(set(self.joint_ids)) != len(self.joint_ids):
+                raise ValueError(f"joint_ids must be unique, got {self.joint_ids}")
+
+        print(
+            f"Dynamixel config: ids={self.joint_ids}, baudrate={self.dynamixel_baudrate}"
         )
 
         # Check latency timer
@@ -229,10 +312,13 @@ class FACTRGravityCompensation:
             print(f"Unexpected error checking latency timer: {e}")
 
         # Initialize driver
-        joint_ids = (np.arange(self.num_motors) + 1).tolist()
         try:
             self.driver = DynamixelDriver(
-                joint_ids, self.servo_types, self.dynamixel_port
+                self.joint_ids,
+                self.servo_types,
+                self.joint_current_limits_ma,
+                self.dynamixel_port,
+                baudrate=self.dynamixel_baudrate,
             )
             print(f"Connected to Dynamixel servos on {self.dynamixel_port}")
         except Exception as e:
@@ -292,8 +378,122 @@ class FACTRGravityCompensation:
         """Calibrate Dynamixel offsets and match initial position."""
         print("Calibrating Dynamixel offsets...")
         self._get_dynamixel_offsets()
+        self._print_leader_pose_report()
         print("Skipping initial position match...")
         print("System calibrated and ready!")
+
+    def _print_leader_pose_report(self) -> None:
+        """Print a startup report of leader raw/calibrated joints and URDF-zero deltas."""
+        if self.driver is None:
+            return
+
+        try:
+            raw_pos, raw_vel = self.driver.get_positions_and_velocities()
+        except Exception as e:
+            print(f"Warning: unable to read leader joints for startup report: {e}")
+            return
+
+        # For revolute joints in this URDF, Pinocchio neutral corresponds to 0 rad.
+        urdf_zero = np.zeros(self.num_arm_joints, dtype=float)
+        if hasattr(self, "pin_model"):
+            try:
+                neutral_q = pin.neutral(self.pin_model)
+                if len(neutral_q) >= self.num_arm_joints:
+                    urdf_zero = np.array(neutral_q[: self.num_arm_joints], dtype=float)
+            except Exception:
+                pass
+
+        print("\n=== Leader Startup Joint Report ===")
+        print("Angles in radians (deg shown in parentheses)")
+        print(
+            "idx | id | raw_pos | offset | sign | calibrated_pos | d_to_urdf_zero | raw_vel"
+        )
+        print("-" * 95)
+
+        for i in range(self.num_arm_joints):
+            raw_i = float(raw_pos[i])
+            off_i = float(self.joint_offsets[i])
+            sign_i = float(self.joint_signs[i])
+            vel_i = float(raw_vel[i])
+            calib_i = sign_i * (raw_i - off_i)
+            delta_zero = calib_i - float(urdf_zero[i])
+
+            print(
+                f"{i:>3} | {self.joint_ids[i]:>2} | "
+                f"{raw_i:+7.3f} ({np.degrees(raw_i):+6.1f}) | "
+                f"{off_i:+7.3f} | {sign_i:+4.0f} | "
+                f"{calib_i:+7.3f} ({np.degrees(calib_i):+6.1f}) | "
+                f"{delta_zero:+7.3f} ({np.degrees(delta_zero):+6.1f}) | "
+                f"{vel_i:+7.3f}"
+            )
+
+        if self.has_leader_gripper and self.num_motors > self.num_arm_joints:
+            gi = self.num_arm_joints
+            raw_g = float(raw_pos[gi])
+            vel_g = float(raw_vel[gi])
+            off_g = float(self.joint_offsets[gi])
+            sign_g = float(self.joint_signs[gi])
+            calib_g = sign_g * (raw_g - off_g)
+            print("-" * 95)
+            print(
+                f"grip| {self.joint_ids[gi]:>2} | "
+                f"{raw_g:+7.3f} ({np.degrees(raw_g):+6.1f}) | "
+                f"{off_g:+7.3f} | {sign_g:+4.0f} | "
+                f"{calib_g:+7.3f} ({np.degrees(calib_g):+6.1f}) | "
+                f"{'n/a':>22} | {vel_g:+7.3f}"
+            )
+
+        print("Reference URDF zero q:", [float(f"{x:.3f}") for x in urdf_zero.tolist()])
+        print("Calibration target q:", [float(f"{x:.3f}") for x in self.calibration_joint_pos.tolist()])
+        print("===================================\n")
+
+    def _print_three_way_joint_report(self) -> None:
+        """Print real leader, leader URDF, and Franka URDF mapped joints side-by-side (degrees)."""
+        if self.driver is None:
+            return
+        if self.map_index is None or self.map_signs is None or self.map_offsets is None:
+            return
+
+        try:
+            raw_pos, _ = self.driver.get_positions_and_velocities()
+        except Exception as e:
+            print(f"Warning: unable to read joints for three-way report: {e}")
+            return
+
+        leader_q = (
+            raw_pos[0 : self.num_arm_joints] - self.joint_offsets[0 : self.num_arm_joints]
+        ) * self.joint_signs[0 : self.num_arm_joints]
+
+        map_index = cast(np.ndarray, self.map_index)
+        map_signs = cast(np.ndarray, self.map_signs)
+        map_offsets = cast(np.ndarray, self.map_offsets)
+        franka_q = map_signs * leader_q[map_index] + map_offsets
+
+        print("\n=== Joint Relationship Report (degrees) ===")
+        print(
+            "fk_joint | leader_joint | real_leader_abs | gello_urdf_joint | franka_urdf_joint | cal_offset | map_offset"
+        )
+        print("-" * 122)
+
+        for fk_i in range(len(map_index)):
+            leader_i = int(map_index[fk_i])
+            real_abs_deg = float(np.degrees(raw_pos[leader_i]))
+            gello_urdf_deg = float(np.degrees(leader_q[leader_i]))
+            franka_urdf_deg = float(np.degrees(franka_q[fk_i]))
+            cal_offset_deg = float(np.degrees(self.joint_offsets[leader_i]))
+            map_offset_deg = float(np.degrees(map_offsets[fk_i]))
+
+            print(
+                f"{fk_i:>8} | {leader_i:>12} | "
+                f"{real_abs_deg:+15.2f} | {gello_urdf_deg:+16.2f} | {franka_urdf_deg:+17.2f} | "
+                f"{cal_offset_deg:+10.2f} | {map_offset_deg:+10.2f}"
+            )
+
+        print("-" * 122)
+        print("Note:")
+        print("  gello_urdf_joint = joint_sign * (real_leader_abs - cal_offset)")
+        print("  franka_urdf_joint = map_sign * gello_urdf_joint + map_offset")
+        print("================================================\n")
 
     def _maybe_setup_teleop(self) -> None:
         """Optionally set up a follower robot and teleop loop if enabled by config."""
@@ -512,6 +712,9 @@ class FACTRGravityCompensation:
         except Exception as e:
             print(f"Warning: teleop debug print failed: {e}")
 
+        # Print three-way relationship table once mapping is finalized.
+        self._print_three_way_joint_report()
+
     def _move_follower_to_start(self, target_joints: np.ndarray) -> None:
         assert self.teleop_env is not None
         obs = self.teleop_env.get_obs()
@@ -613,7 +816,28 @@ class FACTRGravityCompensation:
                 time.sleep(sleep_t)
 
     def _get_dynamixel_offsets(self, verbose: bool = True) -> None:
-        """Calibrate Dynamixel servos to match expected joint positions."""
+        """
+        Calibrate Dynamixel servos to match expected joint positions.
+        
+        If joint_offsets are provided in the config, use those instead of recalculating.
+        This allows manual calibration results to be persisted.
+        """
+        # Check if offsets are provided in config (from manual calibration)
+        config_offsets = self.config["dynamixel"].get("joint_offsets")
+        if config_offsets is not None:
+            self.joint_offsets = np.array(config_offsets, dtype=float)
+            if len(self.joint_offsets) != self.num_motors:
+                print(
+                    f"Warning: joint_offsets length mismatch (config={len(self.joint_offsets)}, "
+                    f"expected={self.num_motors}). Recalibrating..."
+                )
+            else:
+                if verbose:
+                    print(f"Using pre-calibrated joint offsets from config:")
+                    print(f"  Offsets: {[f'{x:.3f}' for x in self.joint_offsets]}")
+                return
+        
+        # If no config offsets, auto-calibrate
         # Warm up
         if self.driver is None:
             raise RuntimeError("Driver not initialized")
@@ -644,9 +868,10 @@ class FACTRGravityCompensation:
                     best_offset = offset
             self.joint_offsets.append(best_offset)
 
-        # Get gripper offset
-        curr_gripper_joint = curr_joints[-1]
-        self.joint_offsets.append(curr_gripper_joint)
+        # Get gripper offset when a dedicated gripper motor exists
+        if self.has_leader_gripper:
+            curr_gripper_joint = curr_joints[-1]
+            self.joint_offsets.append(curr_gripper_joint)
         self.joint_offsets = np.asarray(self.joint_offsets)
 
         if verbose:
@@ -685,12 +910,17 @@ class FACTRGravityCompensation:
             * self.joint_signs[0 : self.num_arm_joints]
         )
 
-        # Process gripper
-        self.leader_gripper_raw_rad = float(joint_pos[-1])
-        self.gripper_pos = (joint_pos[-1] - self.joint_offsets[-1]) * self.joint_signs[
-            -1
-        ]
-        gripper_vel = (self.gripper_pos - self.gripper_pos_prev) / self.dt
+        # Process gripper (optional)
+        if self.has_leader_gripper:
+            self.leader_gripper_raw_rad = float(joint_pos[-1])
+            self.gripper_pos = (joint_pos[-1] - self.joint_offsets[-1]) * self.joint_signs[
+                -1
+            ]
+            gripper_vel = (self.gripper_pos - self.gripper_pos_prev) / self.dt
+        else:
+            self.leader_gripper_raw_rad = 0.0
+            self.gripper_pos = 0.0
+            gripper_vel = 0.0
 
         return joint_pos_arm, joint_vel_arm, self.gripper_pos, gripper_vel
 
@@ -700,8 +930,11 @@ class FACTRGravityCompensation:
         """Apply torque to leader arm and gripper."""
         if self.driver is None:
             raise RuntimeError("Driver not initialized")
-        arm_gripper_torque = np.append(arm_torque, gripper_torque)
-        self.driver.set_torque((arm_gripper_torque * self.joint_signs).tolist())
+        if self.has_leader_gripper:
+            arm_gripper_torque = np.append(arm_torque, gripper_torque)
+            self.driver.set_torque((arm_gripper_torque * self.joint_signs).tolist())
+        else:
+            self.driver.set_torque((arm_torque * self.joint_signs[: self.num_arm_joints]).tolist())
 
     def joint_limit_barrier(
         self,
@@ -725,7 +958,9 @@ class FACTRGravityCompensation:
         ) * exceed_min_mask
 
         # Gripper limits
-        if gripper_joint_pos > self.gripper_limit_max:
+        if not self.has_leader_gripper:
+            tau_l_gripper = 0.0
+        elif gripper_joint_pos > self.gripper_limit_max:
             tau_l_gripper = (
                 -self.joint_limit_kp * (gripper_joint_pos - self.gripper_limit_max)
                 - self.joint_limit_kd * gripper_joint_vel
@@ -754,6 +989,7 @@ class FACTRGravityCompensation:
             np.zeros_like(arm_joint_vel),
         )
         self.tau_g *= self.gravity_comp_modifier
+        self.tau_g *= self.gravity_comp_joint_gains
         return self.tau_g
 
     def friction_compensation(
@@ -835,8 +1071,14 @@ class FACTRGravityCompensation:
                 sleep_time = max(0, self.dt - elapsed)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
-                else:
-                    print(f"Warning: Control loop overrun by {elapsed - self.dt:.4f}s")
+                elif self.print_overrun_warnings:
+                    now = time.time()
+                    # Throttle to avoid flooding terminal output.
+                    if now - self._last_overrun_warn_t > 1.0:
+                        print(
+                            f"Warning: Control loop overrun by {elapsed - self.dt:.4f}s"
+                        )
+                        self._last_overrun_warn_t = now
 
         except KeyboardInterrupt:
             print("\nShutting down...")
@@ -887,6 +1129,17 @@ def main() -> int:
         default="xdof/sandboxs/jliu/factr_grav_comp_demo.yaml",
         help="Path to configuration YAML file",
     )
+    parser.add_argument(
+        "--no-gravity-comp",
+        action="store_true",
+        help="Disable gravity compensation (just read joint states and apply teleop)",
+    )
+    parser.add_argument(
+        "--gravity-gain",
+        type=float,
+        default=None,
+        help="Override controller.gravity_comp.gain at runtime (e.g., 0.2 for softer backdrivability)",
+    )
 
     args = parser.parse_args()
 
@@ -897,7 +1150,12 @@ def main() -> int:
 
     try:
         # Create and run gravity compensation system
-        system = FACTRGravityCompensation(args.config)
+        enable_gc = None if not args.no_gravity_comp else False
+        system = FACTRGravityCompensation(
+            args.config,
+            enable_gravity_comp=enable_gc,
+            gravity_comp_gain=args.gravity_gain,
+        )
 
         # Set up signal handler for clean shutdown
         def signal_handler(signum, frame):

@@ -1,0 +1,130 @@
+name: franka_gello_franka_sim
+
+dynamixel:
+  # USB port name from: ls /dev/serial/by-id/
+  dynamixel_port: "usb-FTDI_USB__-__Serial_Converter_FTB8HKY1-if00-port0"
+  # Common Dynamixel baudrates: 57600, 115200, 1000000, 2000000, 3000000, 4000000
+  baudrate: 57600
+
+  # Explicit motor IDs in physical order J1..J7, Gripper.
+  # Your setup uses IDs 0..7.
+  joint_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+
+  # 7-DOF Franka-kinematic GELLO leader + dedicated gripper motor
+  # Keep these exactly in physical joint order J1..J7, Gripper
+  servo_types:
+    - "XL330_M288_T"
+    - "XL330_M288_T"
+    - "XL330_M288_T"
+    - "XL330_M288_T"
+    - "XL330_M288_T"
+    - "XL330_M288_T"
+    - "XL330_M288_T"
+    - "XL330_M077_T"
+
+  # Leader motor direction signs in J1..J7, Gripper order.
+  # Calibrated on 2026-04-18: J0,J2,J5,J6 need to be negated; others correct as-is.
+  joint_signs: [1, 1, 1, -1, 1, -1, 1, 1]
+
+  # Leader motor home pose offsets (radians) in J1..J7, Gripper order.
+  # These are the raw encoder readings at the physical home/upright pose.
+  # Formula: calibrated_joint = sign * (raw_reading - offset)
+  # At home: calibrated should read 0.0
+  # Home position: [178.77°, 174.81°, 180.09°, 135.51°, 88.24°, 272.02°, 210.00°, 0.0°]
+  # Calibrated on 2026-04-18
+  joint_offsets: [3.12011692, 3.05108779, 3.14312663, 2.35619449, 1.54011671, 4.74767054, 3.66519143, 0.0]
+
+  # Per-joint current caps (mA) for J1..J7, Gripper.
+  # Lower values reduce hard pushback/chatter while back-driving.
+  current_limits_ma: [180, 220, 180, 210, 180, 180, 180, 100]
+
+arm_teleop:
+  # Franka-kinematic GELLO URDF
+  leader_urdf: "gello/factr/urdf/factr_teleop_franka.urdf"
+
+  # Franka arm joints only
+  num_arm_joints: 7
+
+  # Broad safety limits; tighten after tuning if desired
+  arm_joint_limits_max: [3.14159, 3.14159, 3.14159, 3.14159, 3.14159, 3.14159, 3.14159]
+  arm_joint_limits_min: [-3.14159, -3.14159, -3.14159, -3.14159, -3.14159, -3.14159, -3.14159]
+  arm_joint_limits_safety_margin: 0.1
+
+  initialization:
+    # Calibration target in leader URDF coordinates (J1..J7)
+    calibration_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Optional pre-match pose (currently not blocking startup in this script)
+    initial_match_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+gripper_teleop:
+  # Used for leader gripper normalization when gripper_config is not provided
+  actuation_range: 0.8
+
+controller:
+  frequency: 500
+
+  torque_feedback:
+    enable: false
+    gain: 3.0
+    damping: 0.0
+    motor_scalar: 94.5652173913
+
+  gravity_comp:
+    enable: true
+    # Global multiplier on all gravity torques.
+    gain: 0.7
+    # Per-joint gravity gains for J1..J7.
+    # J2 and J4 are higher to improve holding; others are reduced for smoother back-drive.
+    per_joint_gains: [0.15, 0.6, 0.15, 0.45, 0.15, 0.15, 0.15]
+
+  null_space_regulation:
+    # 7D target corresponding to arm joints J1..J7
+    null_space_joint_target: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    kp: 0.0
+    kd: 0.0
+
+  static_friction_comp:
+    enable_speed: 0.0
+    gain: 0.0
+
+  joint_limit_barrier:
+    kp: 0.0
+    kd: 0.0
+
+  joint_position_control:
+    interpolation_step_size: 0.5
+    kp: 1.03561658022
+    kd: 0.04315069084
+
+  gripper_feedback:
+    enable: false
+
+teleop:
+  enable: true
+  hz: 30
+  wait_for_server_timeout_s: 5.0
+
+  robot:
+    _target_: gello.robots.sim_robot.MujocoRobotServer
+    xml_path: third_party/mujoco_menagerie/franka_emika_panda/panda.xml
+    gripper_xml_path: null
+    host: 127.0.0.1
+    port: 6001
+
+  mapping:
+    # 1:1 arm mapping: Franka-GELLO J1..J7 -> Sim Franka joint1..joint7
+    index_map: [0, 1, 2, 3, 4, 5, 6]
+
+    # Sign correction on follower command; keep +1 initially for kinematic match
+    signs: [1, 1, 1, 1, 1, 1, 1]
+
+    # Additive follower offsets (rad), applied as:
+    # follower = leader + offsets (for signs = +1).
+    # These were set from your startup report d_to_urdf_zero values
+    # using offsets = -d_to_urdf_zero.
+    offsets: [-0.178, 0.052, 0.012, -0.658, 0.143, 0.006, -0.063]
+
+    # Keep fixed offsets from the log; disable runtime overwrite.
+    auto_align: false
+
+  gripper_config: null

@@ -1,0 +1,34 @@
+
+GELLO FRANKA CALIBRATION RESULTS
+======================================================================
+
+CONFIG FILE: configs/franka_gello_franka_sim.yaml
+TIMESTAMP: 2026-04-18 23:57:05
+
+HOME POSE (BASELINE):
+  Radians: [3.12011692 3.05108779 3.14312663 1.54471865 1.54011671 4.74767054
+ 4.790622  ]
+  Degrees: [178.76953125 174.81445312 180.08789062  88.50585938  88.2421875
+ 272.02148438 274.48242188]
+
+JOINT SIGNS (to apply to calibration):
+  [-1  1 -1  1  1 -1 -1]
+
+CALIBRATION OFFSET (to apply in config):
+  These are the negated home pose values (so home becomes zero):
+  Radians: [-3.12011692 -3.05108779 -3.14312663 -1.54471865 -1.54011671 -4.74767054
+ -4.790622  ]
+  Degrees: [-178.76953125 -174.81445312 -180.08789062  -88.50585938  -88.2421875
+ -272.02148438 -274.48242188]
+
+HOW TO USE:
+1. Update your config file with:
+   - dynamixel.joint_offsets: [np.float64(-3.120116922559394), np.float64(-3.05108778710454), np.float64(-3.143126634377679), np.float64(-1.5447186534008406), np.float64(-1.5401167110371838), np.float64(-4.74767053850606), np.float64(-4.790622000566858)]
+   - dynamixel.joint_signs: [np.int64(-1), np.int64(1), np.int64(-1), np.int64(1), np.int64(1), np.int64(-1), np.int64(-1)]
+
+2. These will be applied in the driver as:
+   leader_joint = (raw_encoder - offset) * sign
+
+3. After applying, the home pose should read as all zeros.
+
+======================================================================

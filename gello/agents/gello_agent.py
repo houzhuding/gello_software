@@ -124,9 +124,17 @@ class GelloAgent(Agent):
             )
         else:
             assert os.path.exists(port), port
-            assert port in PORT_CONFIG_MAP, f"Port {port} not in config map"
 
-            config = PORT_CONFIG_MAP[port]
+            if port in PORT_CONFIG_MAP:
+                config = PORT_CONFIG_MAP[port]
+            else:
+                import warnings
+
+                warnings.warn(
+                    f"Port {port} not in config map; using first available config as fallback."
+                )
+                # Fallback: use the first available config in the map
+                config = next(iter(PORT_CONFIG_MAP.values()))
             self._robot = config.make_robot(port=port, start_joints=start_joints)
 
     def act(self, obs: Dict[str, np.ndarray]) -> np.ndarray:

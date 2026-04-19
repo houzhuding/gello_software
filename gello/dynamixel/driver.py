@@ -38,12 +38,18 @@ POSITION_CONTROL_MODE = 3
 TORQUE_TO_CURRENT_MAPPING = {
     "XC330_T288_T": 1158.73,
     "XM430_W210_T": 1000 / 2.69,
+    # XL330 models are treated as XC330-compatible for torque-current mapping
+    "XL330_M288_T": 1158.73,
+    "XL330_M077_T": 1158.73,
 }
 
 # Servo specifications for current limits (in mA)
 SERVO_CURRENT_LIMITS = {
     "XC330_T288_T": 1193,
     "XM430_W210_T": 1263,
+    # XL330 models use the same conservative limit as XC330 by default
+    "XL330_M288_T": 1193,
+    "XL330_M077_T": 1193,
 }
 
 
@@ -162,6 +168,7 @@ class DynamixelDriver(DynamixelDriverProtocol):
         self,
         ids: Sequence[int],
         servo_types: Optional[Sequence[str]] = None,
+        current_limits_ma: Optional[Sequence[float]] = None,
         port: str = "/dev/ttyUSB0",
         baudrate: int = 57600,
         max_retries: int = 3,
@@ -172,6 +179,7 @@ class DynamixelDriver(DynamixelDriverProtocol):
         Args:
             ids (Sequence[int]): A list of IDs for the Dynamixel servos.
             servo_types (Optional[Sequence[str]]): Optional servo model names for torque->current mapping.
+            current_limits_ma (Optional[Sequence[float]]): Optional per-joint current limits in mA.
             port (str): The USB port to connect to the arm.
             baudrate (int): The baudrate for communication.
             max_retries (int): Maximum number of initialization attempts.
@@ -201,6 +209,19 @@ class DynamixelDriver(DynamixelDriverProtocol):
         else:
             self.torque_to_current_map = None
             self.current_limits = None
+
+        if current_limits_ma is not None:
+            override_limits = np.array(current_limits_ma, dtype=float)
+            if len(override_limits) != len(self._ids):
+                raise ValueError(
+                    "Invalid current_limits_ma length: expected same length as ids "
+                    f"(got current_limits_ma={len(override_limits)}, ids={len(self._ids)})"
+                )
+            if np.any(override_limits <= 0):
+                raise ValueError(
+                    f"current_limits_ma must be > 0 for all joints, got {override_limits.tolist()}"
+                )
+            self.current_limits = override_limits
 
         # Initialize with retry logic
         if not self._initialize_with_retries():
@@ -397,6 +418,7 @@ class DynamixelDriver(DynamixelDriverProtocol):
             return
 
         torque_value = TORQUE_ENABLE if enable else TORQUE_DISABLE
+        failed_ids = []
         with self._lock:
             for dxl_id in self._ids:
                 dxl_comm_result, dxl_error = self._packetHandler.write1ByteTxRx(
@@ -405,24 +427,45 @@ class DynamixelDriver(DynamixelDriverProtocol):
                 if dxl_comm_result != COMM_SUCCESS or dxl_error != 0:
                     print(dxl_comm_result)
                     print(dxl_error)
-                    raise RuntimeError(
-                        f"Failed to set torque mode for Dynamixel with ID {dxl_id}"
-                    )
+                    failed_ids.append(dxl_id)
 
+        if failed_ids:
+            import warnings
+
+            if enable and len(failed_ids) == len(self._ids):
+                # Enabling torque failed for all servos — treat as fatal
+                raise RuntimeError(
+                    f"Failed to set torque mode for all Dynamixel IDs: {failed_ids}"
+                )
+            warnings.warn(
+                f"Failed to set torque mode for Dynamixel IDs: {failed_ids}; continuing."
+            )
+
+        # Update internal flag even if some IDs failed — caller can check per-servos via readbacks later
         self._torque_enabled = enable
 
     def set_operating_mode(self, mode: int):
         if self._is_fake:
             return
+        failed_ids = []
         with self._lock:
             for dxl_id in self._ids:
                 dxl_comm_result, dxl_error = self._packetHandler.write1ByteTxRx(
                     self._portHandler, dxl_id, ADDR_OPERATING_MODE, mode
                 )
                 if dxl_comm_result != COMM_SUCCESS or dxl_error != 0:
-                    raise RuntimeError(
-                        f"Failed to set operating mode for Dynamixel with ID {dxl_id}"
-                    )
+                    failed_ids.append(dxl_id)
+
+        if failed_ids:
+            import warnings
+
+            if len(failed_ids) == len(self._ids):
+                raise RuntimeError(
+                    f"Failed to set operating mode for all Dynamixel IDs: {failed_ids}"
+                )
+            warnings.warn(
+                f"Failed to set operating mode for Dynamixel IDs: {failed_ids}; continuing."
+            )
 
     def verify_operating_mode(self, expected_mode: int):
         if self._is_fake:
@@ -584,8 +627,19 @@ class DynamixelDriver(DynamixelDriverProtocol):
             return
 
         self._stop_thread.set()
-        self._reading_thread.join()
-        self._portHandler.closePort()
+
+        # Close port first to help unblock any in-flight SDK I/O in the read thread.
+        try:
+            self._portHandler.closePort()
+        except Exception:
+            pass
+
+        # Avoid indefinite hang on shutdown if the read thread is stuck in driver I/O.
+        reading_thread = getattr(self, "_reading_thread", None)
+        if reading_thread is not None:
+            reading_thread.join(timeout=1.0)
+            if reading_thread.is_alive():
+                print("Warning: Dynamixel read thread did not exit within timeout.")
 
 
 def main():
