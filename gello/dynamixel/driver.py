@@ -496,7 +496,14 @@ class DynamixelDriver(DynamixelDriverProtocol):
             with self._lock:
                 _joint_angles = np.zeros(len(self._ids), dtype=int)
                 _velocities = np.zeros(len(self._ids), dtype=int)
-                dxl_comm_result = self._groupSyncRead.txRxPacket()
+                try:
+                    dxl_comm_result = self._groupSyncRead.txRxPacket()
+                except Exception as e:
+                    # Port can close while the thread is blocked in SDK read during shutdown.
+                    if self._stop_thread.is_set():
+                        break
+                    print(f"warning, read thread exception: {e}")
+                    continue
                 if dxl_comm_result != COMM_SUCCESS:
                     print(f"warning, comm failed: {dxl_comm_result}")
                     continue

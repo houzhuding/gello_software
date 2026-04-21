@@ -196,7 +196,7 @@ def main():
     # Extract driver config
     baudrate = config['dynamixel'].get('baudrate', 57600)
     joint_ids = config['dynamixel'].get('joint_ids', list(range(8)))
-    port = config['dynamixel'].get('port', '/dev/ttyUSB0')
+    port = config['dynamixel'].get('port', '/dev/ttyUSB1')
     num_arm_joints = config['dynamixel'].get('num_arm_joints', 7)
     
     print(f"  Arm joints: {num_arm_joints}")

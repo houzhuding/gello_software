@@ -250,7 +250,12 @@ class MujocoRobotServer:
                     time.sleep(time_until_next_step)
 
     def stop(self) -> None:
-        self._zmq_server_thread.join()
+        zmq_thread = getattr(self, "_zmq_server_thread", None)
+        if zmq_thread is not None:
+            zmq_thread.join()
 
     def __del__(self) -> None:
-        self.stop()
+        try:
+            self.stop()
+        except Exception:
+            pass
