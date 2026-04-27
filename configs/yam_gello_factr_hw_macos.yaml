@@ -1,0 +1,121 @@
+arm_teleop:
+  arm_joint_limits_max:
+  - 3.14159
+  - 3.14159
+  - 3.14159
+  - 3.14159
+  - 3.14159
+  - 3.14159
+  arm_joint_limits_min:
+  - -3.14159
+  - -3.14159
+  - -3.14159
+  - -3.14159
+  - -3.14159
+  - -3.14159
+  arm_joint_limits_safety_margin: 0.1
+  initialization:
+    calibration_joint_pos:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    initial_match_joint_pos:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+  leader_urdf: gello/factr/urdf/yam_active_gello/robot.urdf
+  num_arm_joints: 6
+controller:
+  frequency: 500
+  gravity_comp:
+    enable: true
+    gain: 0.6
+  gripper_feedback:
+    enable: true
+  joint_limit_barrier:
+    kd: 0.0
+    kp: 0.0
+  joint_position_control:
+    interpolation_step_size: 0.01
+    kd: 0.04315069084
+    kp: 1.03561658022
+  null_space_regulation:
+    kd: 0.0
+    kp: 0.0
+    null_space_joint_target:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  static_friction_comp:
+    enable_speed: 0.0
+    gain: 0.0
+  torque_feedback:
+    damping: 0.0
+    enable: false
+    gain: 3.0
+    motor_scalar: 94.5652173913
+dynamixel:
+  dynamixel_port: usb-FTDI_USB__-__Serial_Converter_FTA2U4GA-if00-port0
+  joint_signs:
+  - 1
+  - -1
+  - -1
+  - -1
+  - 1
+  - 1
+  - 1
+  servo_types:
+  - XC330_T288_T
+  - XM430_W210_T
+  - XM430_W210_T
+  - XC330_T288_T
+  - XC330_T288_T
+  - XC330_T288_T
+  - XC330_T288_T
+gripper_teleop:
+  actuation_range: 0.8
+name: grav_comp_hw
+teleop:
+  enable: true
+  gripper_config:
+  - 7
+  - 241.4375
+  - 300.9375
+  hz: 30
+  mapping:
+    auto_align: true
+    index_map:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    offsets:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    signs:
+    - 1
+    - 1
+    - -1
+    - -1
+    - 1
+    - 1
+  robot:
+    _target_: gello.robots.yam.YAMRobot
+    channel: can_right
+  wait_for_server_timeout_s: 5.0

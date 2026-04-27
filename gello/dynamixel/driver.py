@@ -592,6 +592,41 @@ class DynamixelDriver(DynamixelDriverProtocol):
     def _kill_processes_using_port(self) -> bool:
         """Kill processes that are using the port."""
         try:
+            if os.name != "posix":
+                return False
+
+            if os.uname().sysname == "Darwin":
+                result = subprocess.run(
+                    ["lsof", "-t", self._port], capture_output=True, text=True
+                )
+                if result.returncode != 0:
+                    return False
+
+                pids = []
+                for token in result.stdout.split():
+                    try:
+                        pid = int(token)
+                    except ValueError:
+                        continue
+                    if pid != os.getpid():
+                        pids.append(pid)
+
+                if not pids:
+                    return False
+
+                killed = False
+                for pid in sorted(set(pids)):
+                    try:
+                        os.kill(pid, 15)
+                        killed = True
+                    except Exception as e:
+                        print(f"Failed to terminate PID {pid}: {e}")
+
+                if killed:
+                    print(f"Sent SIGTERM to processes using {self._port}: {sorted(set(pids))}")
+                    time.sleep(1)
+                return killed
+
             result = subprocess.run(
                 ["fuser", "-k", self._port], capture_output=True, text=True
             )
@@ -607,12 +642,32 @@ class DynamixelDriver(DynamixelDriverProtocol):
     def _fix_port_permissions(self) -> bool:
         """Fix port permissions if needed."""
         try:
+            try:
+                os.chmod(self._port, 0o666)
+                print(f"Fixed permissions for {self._port} (without sudo)")
+                return True
+            except PermissionError:
+                pass
+
+            allow_sudo = os.environ.get("GELLO_ALLOW_SUDO_CHMOD", "0") == "1"
+            if not allow_sudo:
+                print(
+                    "Skipping sudo chmod (set GELLO_ALLOW_SUDO_CHMOD=1 to enable non-interactive sudo attempt)."
+                )
+                return False
+
             result = subprocess.run(
-                ["sudo", "chmod", "666", self._port], capture_output=True, text=True
+                ["sudo", "-n", "chmod", "666", self._port],
+                capture_output=True,
+                text=True,
             )
             if result.returncode == 0:
-                print(f"Fixed permissions for {self._port}")
+                print(f"Fixed permissions for {self._port} (sudo -n)")
                 return True
+            print(
+                f"Failed to fix permissions with sudo -n for {self._port}. "
+                "Run manually if needed: sudo chmod 666 <port>"
+            )
             return False
         except Exception as e:
             print(f"Error fixing port permissions: {e}")

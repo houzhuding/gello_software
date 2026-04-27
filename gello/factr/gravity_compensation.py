@@ -29,7 +29,15 @@ from typing import Any, Dict, cast
 
 
 def find_ttyusb(port_name: str) -> str:
-    """Locate the underlying ttyUSB device."""
+    """Locate the underlying ttyUSB device (Linux)."""
+    if os.path.isabs(port_name):
+        actual_device = os.path.basename(port_name)
+        if actual_device.startswith("ttyUSB"):
+            return actual_device
+        raise Exception(
+            f"Port path '{port_name}' is not a ttyUSB device (got '{actual_device}')."
+        )
+
     base_path = "/dev/serial/by-id/"
     full_path = os.path.join(base_path, port_name)
     if not os.path.exists(full_path):
@@ -47,6 +55,31 @@ def find_ttyusb(port_name: str) -> str:
         raise Exception(
             f"Unable to resolve the symbolic link for '{port_name}'. {e}"
         ) from e
+
+
+def resolve_dynamixel_port(port_name: str) -> str:
+    """Resolve configured Dynamixel port to an OS-appropriate path."""
+    port_name = str(port_name).strip()
+    if not port_name:
+        raise ValueError("dynamixel_port is empty")
+
+    if os.path.isabs(port_name):
+        return port_name
+
+    linux_by_id_path = os.path.join("/dev/serial/by-id", port_name)
+    if os.path.exists(linux_by_id_path):
+        return linux_by_id_path
+
+    if sys.platform == "darwin":
+        for candidate in [
+            os.path.join("/dev", port_name),
+            os.path.join("/dev", f"tty.{port_name}"),
+            os.path.join("/dev", f"cu.{port_name}"),
+        ]:
+            if os.path.exists(candidate):
+                return candidate
+
+    return linux_by_id_path
 
 
 def _instantiate_from_dict(cfg: Dict[str, Any]) -> Any:
@@ -252,9 +285,8 @@ class FACTRGravityCompensation:
                 "Invalid joint_signs length: expected same length as servo_types "
                 f"(got joint_signs={len(self.joint_signs)}, servo_types={self.num_motors})"
             )
-        self.dynamixel_port = (
-            "/dev/serial/by-id/" + self.config["dynamixel"]["dynamixel_port"]
-        )
+        configured_port = self.config["dynamixel"]["dynamixel_port"]
+        self.dynamixel_port = resolve_dynamixel_port(configured_port)
         self.dynamixel_baudrate = int(self.config["dynamixel"].get("baudrate", 57600))
         joint_current_limits_cfg = self.config["dynamixel"].get("current_limits_ma")
         if joint_current_limits_cfg is None:
@@ -288,28 +320,30 @@ class FACTRGravityCompensation:
             f"Dynamixel config: ids={self.joint_ids}, baudrate={self.dynamixel_baudrate}"
         )
 
-        # Check latency timer
-        try:
-            port_name = os.path.basename(self.dynamixel_port)
-            ttyUSBx = find_ttyusb(port_name)
-            latency_path = f"/sys/bus/usb-serial/devices/{ttyUSBx}/latency_timer"
-            result = subprocess.run(
-                ["cat", latency_path], capture_output=True, text=True, check=True
-            )
-            ttyUSB_latency_timer = int(result.stdout)
-            if ttyUSB_latency_timer != 1:
-                print(
-                    f"Warning: Latency timer of {ttyUSBx} is {ttyUSB_latency_timer}, should be 1 for optimal performance."
+        # Check latency timer (Linux ttyUSB only)
+        if sys.platform.startswith("linux"):
+            try:
+                ttyUSBx = find_ttyusb(configured_port)
+                latency_path = f"/sys/bus/usb-serial/devices/{ttyUSBx}/latency_timer"
+                result = subprocess.run(
+                    ["cat", latency_path], capture_output=True, text=True, check=True
                 )
-                print(
-                    f"Run: echo 1 | sudo tee /sys/bus/usb-serial/devices/{ttyUSBx}/latency_timer"
-                )
-        except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as e:
-            print(f"Could not check latency timer (file access issue): {e}")
-        except (ValueError, IndexError) as e:
-            print(f"Could not parse latency timer value: {e}")
-        except Exception as e:
-            print(f"Unexpected error checking latency timer: {e}")
+                ttyUSB_latency_timer = int(result.stdout)
+                if ttyUSB_latency_timer != 1:
+                    print(
+                        f"Warning: Latency timer of {ttyUSBx} is {ttyUSB_latency_timer}, should be 1 for optimal performance."
+                    )
+                    print(
+                        f"Run: echo 1 | sudo tee /sys/bus/usb-serial/devices/{ttyUSBx}/latency_timer"
+                    )
+            except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as e:
+                print(f"Could not check latency timer (file access issue): {e}")
+            except (ValueError, IndexError) as e:
+                print(f"Could not parse latency timer value: {e}")
+            except Exception as e:
+                print(f"Unexpected error checking latency timer: {e}")
+        else:
+            print("Skipping latency timer check on non-Linux platform")
 
         # Initialize driver
         try:
@@ -515,6 +549,20 @@ class FACTRGravityCompensation:
         robot_cfg = teleop_cfg.get("robot")
         if not isinstance(robot_cfg, dict) or "_target_" not in robot_cfg:
             raise ValueError("teleop.robot must be a dict containing a _target_ field")
+
+        robot_cfg = dict(robot_cfg)
+        gello_repo_root = Path(__file__).resolve().parents[2]
+        for path_key in ("xml_path", "gripper_xml_path"):
+            raw_path = robot_cfg.get(path_key)
+            if isinstance(raw_path, str) and raw_path.strip():
+                path_obj = Path(raw_path)
+                if not path_obj.is_absolute() and not path_obj.exists():
+                    resolved = gello_repo_root / path_obj
+                    if resolved.exists():
+                        robot_cfg[path_key] = str(resolved)
+                        print(
+                            f"Resolved teleop.robot.{path_key} -> {robot_cfg[path_key]}"
+                        )
 
         # Optional gripper config: [id, open_deg, close_deg]
         gc = teleop_cfg.get("gripper_config")
