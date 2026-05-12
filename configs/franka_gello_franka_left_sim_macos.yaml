@@ -34,8 +34,8 @@ dynamixel:
   # At home: calibrated should read 0.0
   # Home position: [178.77°, 174.81°, 180.09°, 135.51°, 88.24°, 272.02°, 210.00°, left-gripper-closed]
   # Calibrated on 2026-04-18
-  joint_offsets: [3.12011692, 3.05108779, 3.14312663, 2.35619449, 1.54011671, 4.74767054, 3.66519143, 2.5541]
-
+  # joint_offsets: [3.12011692, 3.05108779, 3.14312663, 2.35619449, 1.54011671, 4.74767054, 3.66519143, 2.5541]
+  joint_offsets: [3.14,3.14,3.14,2.18,1.57,4.71,3.927,2.5541]
   # Per-joint current caps (mA) for J1..J7, Gripper.
   # Lower values reduce hard pushback/chatter while back-driving.
   current_limits_ma: [180, 220, 180, 210, 180, 180, 180, 100]

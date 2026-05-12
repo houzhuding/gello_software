@@ -26,7 +26,8 @@ dynamixel:
 
   # Leader motor direction signs in J1..J7, Gripper order.
   # Calibrated on 2026-04-18: J0,J2,J5,J6 need to be negated; others correct as-is.
-  joint_signs: [1, -1, 1, -1, 1, -1, 1, 1]
+  # joint_signs: [1, -1, 1, -1, 1, -1, 1, 1]
+  joint_signs: [1, 1, 1, -1, 1, -1, 1, 1]
 
   # Leader motor home pose offsets (radians) in J1..J7, Gripper order.
   # These are the raw encoder readings at the physical home/upright pose.
@@ -34,8 +35,8 @@ dynamixel:
   # At home: calibrated should read 0.0
   # Home position: [178.77°, 174.81°, 180.09°, 125.0°, 180.24°, 272.02°, 220.00°, right-gripper-closed]
   # Calibrated on 2026-04-18
-  joint_offsets: [3.12011692, 3.05108779, 3.14159, 2.18166156, 3.24159, 4.74767054, 3.83972435, 2.5663]
-
+  # joint_offsets: [3.12011692, 3.05108779, 3.14159, 2.18166156, 3.24159, 4.74767054, 3.83972435, 2.5663]
+  joint_offsets: [4.71,3.14,0,2.18,3.14,4.74767054,3.927,2.5663]  
   # Per-joint current caps (mA) for J1..J7, Gripper.
   # Lower values reduce hard pushback/chatter while back-driving.
   current_limits_ma: [180, 220, 180, 210, 180, 180, 180, 100]
